@@ -1,0 +1,42 @@
+[package]
+name = "iroh-webrtc-transport"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+iroh = { version = "0.97", features = ["unstable-custom-transports"] }
+n0-error = "0.1.3"
+n0-watcher = "0.6.1"
+noq-udp = "0.9"
+iroh-base = { version = "0.97", features = ["key"] }
+bytes = "1"
+nym-sdk = "1.20.4"
+nym-noise-keys = "=1.20.4"
+anyhow = "1.0.102"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+webrtc = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+async-trait = "0.1"
+futures-util = "0.3"
+tokio-tungstenite = "0.26"
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+
+[[bin]]
+name = "signaling-server"
+path = "src/bin/signaling_server.rs"
+
+[[bin]]
+name = "static-server"
+path = "src/bin/static_server.rs"
+
+[[bin]]
+name = "ws-chat"
+path = "src/bin/ws_chat.rs"
+
+[[bin]]
+name = "iroh-jsep-chat"
+path = "src/bin/iroh_jsep_chat.rs"

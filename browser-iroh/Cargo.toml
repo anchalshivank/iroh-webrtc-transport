@@ -1,0 +1,15 @@
+[package]
+name = "iroh-browser-node"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+console_error_panic_hook = "0.1"
+iroh = { version = "0.97", default-features = false }
+tokio = { version = "1", features = ["io-util"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
