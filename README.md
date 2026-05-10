@@ -9,13 +9,13 @@ Rust library and demos that combine **iroh** (QUIC, custom transports) with **We
 
 | Piece                                                                                          | Role                                                                                          |
 | ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `[Signaling](src/jsep_signaling.rs)`                                                           | Async trait: `send_envelope` / `recv_envelope` for `[SignalEnvelope](src/jsep_envelope.rs)`.  |
-| `[SignalEnvelope](src/jsep_envelope.rs)`                                                       | JSON `offer` / `answer` SDP payloads.                                                         |
-| `[negotiate_dc_as_offerer](src/jsep_core.rs)` / `[negotiate_dc_as_answerer](src/jsep_core.rs)` | Generic WebRTC negotiation over any `Signaling` impl (webrtc-rs).                             |
-| `[QuicSignaling](src/jsep_quic.rs)`                                                            | Newline-framed JSON on an iroh **bidi** stream (matches browser WASM framing).                |
-| `[TcpWebSocket](src/jsep_ws.rs)`                                                               | `Signaling` for `tokio-tungstenite` WebSockets (one JSON text frame per envelope).            |
-| `[JSEP_SIGNALING_ALPN](src/jsep_alpn.rs)`                                                      | Shared ALPN bytes for QUIC JSEP: `iroh-webrtc-transport/signal/0`.                            |
-| `[WebRtcTunnel](src/bridge.rs)` / `[WebRtcTransport](src/transport.rs)`                        | Bridge SCTP data channel ↔ iroh custom transport (`poll_send` / `poll_recv`, attach, wakers). |
+| [Signaling](src/jsep_signaling.rs)                                                             | Async trait: `send_envelope` / `recv_envelope` for [SignalEnvelope](src/jsep_envelope.rs).     |
+| [SignalEnvelope](src/jsep_envelope.rs)                                                         | JSON `offer` / `answer` SDP payloads.                                                         |
+| [negotiate_dc_as_offerer](src/jsep_core.rs) / [negotiate_dc_as_answerer](src/jsep_core.rs)       | Generic WebRTC negotiation over any `Signaling` impl (webrtc-rs).                             |
+| [QuicSignaling](src/jsep_quic.rs)                                                              | Newline-framed JSON on an iroh **bidi** stream (matches browser WASM framing).                |
+| [TcpWebSocket](src/jsep_ws.rs)                                                                 | `Signaling` for `tokio-tungstenite` WebSockets (one JSON text frame per envelope).            |
+| [JSEP_SIGNALING_ALPN](src/jsep_alpn.rs)                                                        | Shared ALPN bytes for QUIC JSEP: `iroh-webrtc-transport/signal/0`.                            |
+| [WebRtcTunnel](src/bridge.rs) / [WebRtcTransport](src/transport.rs)                            | Bridge SCTP data channel ↔ iroh custom transport (`poll_send` / `poll_recv`, attach, wakers). |
 
 
 ---
