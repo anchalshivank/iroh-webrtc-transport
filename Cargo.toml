@@ -15,10 +15,11 @@ nym-sdk = "1.20.4"
 nym-noise-keys = "=1.20.4"
 anyhow = "1.0.102"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-webrtc = "0.17"
+str0m = "0.19"
+str0m-aws-lc-rs = "0.4"
+if-addrs = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 async-trait = "0.1"
 futures-util = "0.3"
 tokio-tungstenite = "0.26"

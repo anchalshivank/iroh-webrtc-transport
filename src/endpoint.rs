@@ -11,9 +11,8 @@ use n0_watcher::Watchable;
 use noq_udp::RecvMeta;
 use tokio::sync::mpsc;
 
-use crate::bridge::WebRtcTunnel;
+use crate::bridge::{InboundPacket, WebRtcTunnel};
 use crate::sender::WebRtcSender;
-use crate::transport::InboundPacket;
 
 #[derive(Debug)]
 pub(crate) struct WebRtcEndpoint {

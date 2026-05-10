@@ -2,19 +2,15 @@
 //!
 //! Usage: `cargo run --bin signaling-server` then `cargo run --bin ws-chat -- ws://127.0.0.1:3000/ws demo`
 
-use std::sync::Arc;
-
 use anyhow::Context as _;
 use futures_util::{SinkExt, StreamExt};
 use iroh_webrtc_transport::{
-    negotiate_dc_as_answerer, negotiate_dc_as_offerer, TcpWebSocket,
+    negotiate_dc_as_answerer, negotiate_dc_as_offerer, Str0mPeer, TcpWebSocket,
 };
 use serde_json::Value;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
-use webrtc::data_channel::RTCDataChannel;
 
 const DC_LABEL: &str = "chat";
 
@@ -50,14 +46,8 @@ async fn read_assigned(ws: &mut TcpWebSocket) -> anyhow::Result<Role> {
     }
 }
 
-async fn dc_line_chat(dc: Arc<RTCDataChannel>) -> anyhow::Result<()> {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-    dc.on_message(Box::new(move |msg: DataChannelMessage| {
-        let tx = tx.clone();
-        Box::pin(async move {
-            let _ = tx.send(msg.data.to_vec());
-        })
-    }));
+async fn dc_line_chat(peer: Str0mPeer) -> anyhow::Result<()> {
+    let (user_tx, mut peer_rx) = peer.spawn_line_io_bridge();
 
     println!("Chat ready on WebRTC data channel `{DC_LABEL}`. Empty line exits.\n");
     let mut stdin = BufReader::new(io::stdin()).lines();
@@ -70,11 +60,11 @@ async fn dc_line_chat(dc: Arc<RTCDataChannel>) -> anyhow::Result<()> {
                     Some(l) => {
                         let mut line = l;
                         line.push('\n');
-                        dc.send_text(line).await.context("data channel send")?;
+                        user_tx.send(line.into_bytes()).map_err(|_| anyhow::anyhow!("str0m bridge closed"))?;
                     }
                 }
             }
-            chunk = rx.recv() => {
+            chunk = peer_rx.recv() => {
                 let Some(chunk) = chunk else { break };
                 let text = String::from_utf8_lossy(&chunk);
                 print!("[peer] {text}");
@@ -107,11 +97,11 @@ async fn main() -> anyhow::Result<()> {
     ws.send(WsMessage::Text(join.into())).await?;
 
     let role = read_assigned(&mut ws).await?;
-    let (_pc, dc) = match role {
+    let peer = match role {
         Role::Offer => negotiate_dc_as_offerer(&mut ws, DC_LABEL).await?,
         Role::Answer => negotiate_dc_as_answerer(&mut ws).await?,
     };
 
-    dc_line_chat(dc).await?;
+    dc_line_chat(peer).await?;
     Ok(())
 }

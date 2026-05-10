@@ -24,18 +24,37 @@
 </head>
 <body>
   <h1>iroh node + WebRTC chat</h1>
-  <p>WASM starts an iroh endpoint. SDP: <strong>iroh QUIC</strong> (no WebSocket) or <strong>WebSocket</strong> (room on <code>signaling-server</code>, see URL below).</p>
+  <p>WASM starts an iroh endpoint. Your <strong>node id</strong> and <strong>home relay</strong> are how others reach you over the network (N0 / relays), not a WebSocket room name.</p>
+  <div style="background:#1e2a1e;border:1px solid #3d5c3d;border-radius:6px;padding:0.75rem 1rem;margin:1rem 0;font-size:0.9rem;">
+    <p style="margin:0 0 0.5rem 0;"><strong>Browser ↔ browser over iroh (QUIC signaling)</strong></p>
+    <ol style="margin:0 0 0.75rem 1.25rem;padding:0;">
+      <li>Tab <strong>A</strong>: signaling <strong>iroh QUIC — wait for peer</strong> → <strong>Connect</strong> (answerer).</li>
+      <li>Tab <strong>B</strong>: signaling <strong>iroh QUIC — dial peer</strong>, paste <strong>A’s node id</strong> and <strong>A’s home relay URL</strong> → <strong>Connect</strong> (offerer).</li>
+      <li>Works across machines if relays/STUN can reach both; for a quick same-relay test use <strong>Same relay as me</strong> only when both tabs show the same relay.</li>
+    </ol>
+    <p style="margin:0 0 0.5rem 0;"><strong>Browser ↔ browser via WebSocket</strong> (no node ids): run <code>signaling-server</code>, both tabs <strong>WebSocket room</strong>, same room name, Connect.</p>
+  </div>
   <p class="row">iroh node id: <code id="iroh-status">…</code></p>
-  <p class="row">home relay (for <code>iroh-jsep-chat</code>): <code id="iroh-relay">…</code></p>
+  <p class="row">home relay (give to dialers / <code>iroh-jsep-chat</code>): <code id="iroh-relay">…</code></p>
   <p class="row">WebSocket JSEP URL (edit if signaling-server is not on port 3000): <code id="ws-url-display"></code></p>
   <div class="row">
     <label>Signaling <select id="sig-mode">
-      <option value="iroh">iroh QUIC (wait for native offer)</option>
-      <option value="ws">WebSocket room</option>
+      <option value="ws" selected>WebSocket room — two browsers OR ws-chat (same room)</option>
+      <option value="iroh-accept">iroh QUIC — wait for peer (answerer)</option>
+      <option value="iroh-dial">iroh QUIC — dial peer (offerer)</option>
     </select></label>
     <label>Room <input id="room" type="text" value="demo" autocomplete="off" /></label>
     <button id="connect" type="button">Connect</button>
     <span id="status"></span>
+  </div>
+  <div class="row" id="iroh-dial-row" style="display: none; flex-wrap: wrap;">
+    <label style="flex:2;min-width:14rem;">Peer node id
+      <input id="peer-node" type="text" placeholder="Other tab’s node id (z32)" autocomplete="off" />
+    </label>
+    <label style="flex:3;min-width:16rem;">Peer home relay URL
+      <input id="peer-relay" type="text" placeholder="Other tab’s home relay (exact string from their page)" autocomplete="off" />
+    </label>
+    <button id="fill-peer-relay" type="button">Same relay as me</button>
   </div>
   <div id="log"></div>
   <div class="row">

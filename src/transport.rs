@@ -7,16 +7,9 @@ use n0_watcher::Watchable;
 
 use crate::bridge::{AttachOptions, WebRtcTunnel};
 use crate::endpoint::WebRtcEndpoint;
+use crate::str0m_peer::Str0mPeer;
 
-/// Custom transport id for [`CustomAddr`] parts (see iroh `TRANSPORTS.md` for registration).
-pub const WEBRTC_TRANSPORT_ID: u64 = u64::from_le_bytes(*b"irohwebr");
-
-/// One inbound datagram worth of bytes from the SCTP data channel, tagged with the peer's [`CustomAddr`].
-#[derive(Debug)]
-pub(crate) struct InboundPacket {
-    pub(crate) source_custom: CustomAddr,
-    pub(crate) payload: Vec<u8>,
-}
+pub use crate::bridge::WEBRTC_TRANSPORT_ID;
 
 /// A WebRTC-backed custom transport: iroh `poll_send` / `poll_recv` are bridged to a negotiated SCTP data channel.
 #[derive(Debug, Clone)]
@@ -40,17 +33,23 @@ impl WebRtcTransport {
         CustomAddr::from_parts(WEBRTC_TRANSPORT_ID, &self.local_addr_bytes)
     }
 
+    /// Queue that feeds the str0m SCTP data channel after [`WebRtcTransport::attach_data_channel`].
+    /// Use for tests or direct SCTP injection (same path as iroh `poll_send`).
+    pub fn webrtc_out_sender(&self) -> tokio::sync::mpsc::UnboundedSender<Vec<u8>> {
+        self.tunnel.out_sender()
+    }
+
     /// Wire a negotiated SCTP data channel into this transport so iroh can send/receive QUIC datagrams on it.
     ///
     /// Call from an async context (Tokio runtime). `remote_custom_addr` must match the peer's advertised
     /// [`CustomAddr`] data (same bytes they passed to [`WebRtcTransport::new`]).
     pub fn attach_data_channel(
         &self,
-        dc: std::sync::Arc<webrtc::data_channel::RTCDataChannel>,
+        peer: Str0mPeer,
         remote_custom_addr: CustomAddr,
         opts: AttachOptions,
     ) -> anyhow::Result<()> {
-        self.tunnel.attach(dc, remote_custom_addr, opts)
+        self.tunnel.attach_str0m_peer(peer, remote_custom_addr, opts)
     }
 }
 

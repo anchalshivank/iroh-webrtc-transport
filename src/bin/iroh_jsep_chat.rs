@@ -1,32 +1,23 @@
 //! WebRTC data-channel chat: native **offerer** dials a browser that is waiting on `accept_jsep_signaling`.
 //! JSEP runs over iroh QUIC (`QuicSignaling`); no WebSocket.
 //!
-//! Usage: `cargo run --bin static-server`, open http://127.0.0.1:8080/, choose “iroh QUIC”, Connect, then:
+//! Usage: `cargo run --bin static-server`, open http://127.0.0.1:8080/, choose “iroh QUIC — wait for peer”, Connect, then:
 //! `cargo run --bin iroh-jsep-chat -- <browser-node-id-z32> <relay-url>`
 
 use std::str::FromStr;
-use std::sync::Arc;
 
 use anyhow::Context as _;
 use iroh::endpoint::presets;
 use iroh::{Endpoint, EndpointAddr, PublicKey, RelayUrl};
 use iroh_webrtc_transport::{
-    negotiate_dc_as_offerer, JSEP_SIGNALING_ALPN, QuicSignaling,
+    negotiate_dc_as_offerer, JSEP_SIGNALING_ALPN, QuicSignaling, Str0mPeer,
 };
 use tokio::io::{self, AsyncBufReadExt, BufReader};
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
-use webrtc::data_channel::RTCDataChannel;
 
 const DC_LABEL: &str = "chat";
 
-async fn dc_line_chat(dc: Arc<RTCDataChannel>) -> anyhow::Result<()> {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-    dc.on_message(Box::new(move |msg: DataChannelMessage| {
-        let tx = tx.clone();
-        Box::pin(async move {
-            let _ = tx.send(msg.data.to_vec());
-        })
-    }));
+async fn dc_line_chat(peer: Str0mPeer) -> anyhow::Result<()> {
+    let (user_tx, mut peer_rx) = peer.spawn_line_io_bridge();
 
     println!("Chat ready on WebRTC data channel `{DC_LABEL}`. Empty line exits.\n");
     let mut stdin = BufReader::new(io::stdin()).lines();
@@ -39,11 +30,11 @@ async fn dc_line_chat(dc: Arc<RTCDataChannel>) -> anyhow::Result<()> {
                     Some(l) => {
                         let mut line = l;
                         line.push('\n');
-                        dc.send_text(line).await.context("data channel send")?;
+                        user_tx.send(line.into_bytes()).map_err(|_| anyhow::anyhow!("str0m bridge closed"))?;
                     }
                 }
             }
-            chunk = rx.recv() => {
+            chunk = peer_rx.recv() => {
                 let Some(chunk) = chunk else { break };
                 let text = String::from_utf8_lossy(&chunk);
                 print!("[peer] {text}");
@@ -88,10 +79,10 @@ async fn main() -> anyhow::Result<()> {
     let (send, recv) = conn.open_bi().await.context("open_bi signaling")?;
 
     let mut sig: QuicSignaling = QuicSignaling::new(send, recv);
-    let (_pc, dc) = negotiate_dc_as_offerer(&mut sig, DC_LABEL)
+    let peer = negotiate_dc_as_offerer(&mut sig, DC_LABEL)
         .await
         .context("WebRTC offer + data channel")?;
 
-    dc_line_chat(dc).await?;
+    dc_line_chat(peer).await?;
     Ok(())
 }

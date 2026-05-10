@@ -15,6 +15,7 @@ mod jsep_quic;
 mod jsep_signaling;
 mod jsep_ws;
 mod sender;
+mod str0m_peer;
 mod transport;
 
 pub use bridge::{custom_addr_from_opaque_data, AttachOptions};
@@ -23,5 +24,6 @@ pub use jsep_core::{negotiate_dc_as_answerer, negotiate_dc_as_offerer};
 pub use jsep_envelope::SignalEnvelope;
 pub use jsep_quic::QuicSignaling;
 pub use jsep_signaling::Signaling;
+pub use str0m_peer::Str0mPeer;
 pub use jsep_ws::TcpWebSocket;
 pub use transport::{WebRtcTransport, WEBRTC_TRANSPORT_ID};

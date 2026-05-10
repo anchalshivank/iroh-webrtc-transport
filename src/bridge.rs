@@ -1,7 +1,7 @@
 //! Bridges iroh [`CustomSender::poll_send`] / [`CustomEndpoint::poll_recv`] to a WebRTC SCTP data channel.
 //!
 //! One [`WebRtcTunnel`] is shared by [`crate::WebRtcTransport`], its [`crate::endpoint::WebRtcEndpoint`], and
-//! [`crate::sender::WebRtcSender`]. After JSEP establishes a channel, call [`WebRtcTunnel::attach`].
+//! [`crate::sender::WebRtcSender`]. After JSEP establishes a channel, call [`WebRtcTunnel::attach_str0m_peer`].
 //!
 //! ## `Arc` vs `Mutex` / `RwLock` (why both appear)
 //!
@@ -15,13 +15,18 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-use bytes::Bytes;
 use iroh_base::CustomAddr;
 use tokio::sync::mpsc;
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
-use webrtc::data_channel::RTCDataChannel;
 
-use crate::transport::{InboundPacket, WEBRTC_TRANSPORT_ID};
+/// Custom transport id for [`CustomAddr`] parts (see iroh `TRANSPORTS.md` for registration).
+pub const WEBRTC_TRANSPORT_ID: u64 = u64::from_le_bytes(*b"irohwebr");
+
+/// One inbound datagram worth of bytes from the SCTP data channel, tagged with the peer's [`CustomAddr`].
+#[derive(Debug)]
+pub(crate) struct InboundPacket {
+    pub(crate) source_custom: CustomAddr,
+    pub(crate) payload: Vec<u8>,
+}
 
 const IN_QUEUE: usize = 1024;
 
@@ -110,84 +115,40 @@ impl WebRtcTunnel {
         }
     }
 
-    /// Attach the negotiated data channel. Must run on a Tokio runtime.
-    pub(crate) fn attach(
-        self: &Arc<Self>,
-        dc: Arc<RTCDataChannel>,
-        remote_custom: CustomAddr,
-        opts: AttachOptions,
-    ) -> anyhow::Result<()> {
+    pub(crate) fn try_mark_attached(&self) -> io::Result<()> {
         if self
             .attached
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            anyhow::bail!("WebRtcTunnel::attach: data channel already attached");
+            return Err(io::Error::other(
+                "WebRtcTunnel::attach: data channel already attached",
+            ));
         }
-
-        {
-            let mut g = self
-                .remote_custom
-                .write()
-                .map_err(|_| anyhow::anyhow!("poisoned tunnel lock"))?;
-            *g = Some(remote_custom);
-        }
-
-        let mut out_rx = self
-            .out_rx
-            .lock()
-            .map_err(|_| anyhow::anyhow!("poisoned tunnel lock"))?
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("outbound receiver already taken"))?;
-
-        let dc_out = Arc::clone(&dc);
-        tokio::spawn(async move {
-            while let Some(bytes) = out_rx.recv().await {
-                if bytes.is_empty() {
-                    continue;
-                }
-                if dc_out.send(&Bytes::from(bytes)).await.is_err() {
-                    break;
-                }
-            }
-        });
-
-        let in_tx = self.in_tx.clone();
-        let wake = Arc::clone(self);
-        let dc_echo = Arc::clone(&dc);
-        let tap = opts.tap_inbound_to.clone();
-        let mirror = opts.mirror_sctp_echo;
-        dc.on_message(Box::new(move |msg: DataChannelMessage| {
-            let in_tx = in_tx.clone();
-            let wake = Arc::clone(&wake);
-            let dc_echo = Arc::clone(&dc_echo);
-            let tap = tap.clone();
-            Box::pin(async move {
-                let remote_custom = match wake.remote_custom.read() {
-                    Ok(g) => g.clone(),
-                    Err(_) => return,
-                };
-                let Some(remote_custom) = remote_custom else {
-                    return;
-                };
-                let bytes = msg.data.to_vec();
-                if let Some(t) = tap.as_ref() {
-                    let _ = t.send(bytes.clone());
-                }
-                let pkt = InboundPacket {
-                    source_custom: remote_custom,
-                    payload: bytes,
-                };
-                if in_tx.send(pkt).await.is_ok() {
-                    wake.wake_recv_pollers();
-                }
-                if mirror {
-                    let _ = dc_echo.send(&msg.data).await;
-                }
-            })
-        }));
-
         Ok(())
+    }
+
+    pub(crate) fn set_remote_custom(&self, addr: CustomAddr) -> io::Result<()> {
+        let mut g = self
+            .remote_custom
+            .write()
+            .map_err(|_| io::Error::other("poisoned tunnel lock"))?;
+        *g = Some(addr);
+        Ok(())
+    }
+
+    pub(crate) fn take_outbound_receiver(
+        &self,
+    ) -> io::Result<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
+        self.out_rx
+            .lock()
+            .map_err(|_| io::Error::other("poisoned tunnel lock"))?
+            .take()
+            .ok_or_else(|| io::Error::other("outbound receiver already taken"))
+    }
+
+    pub(crate) fn inbound_sender(&self) -> mpsc::Sender<InboundPacket> {
+        self.in_tx.clone()
     }
 }
 

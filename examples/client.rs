@@ -115,13 +115,13 @@ async fn main() -> Result<()> {
     let (send, recv) = connection.open_bi().await.context("open bi stream")?;
 
     let mut sig = iroh_webrtc_transport::QuicSignaling::new(send, recv);
-    let (_pc, dc) = iroh_webrtc_transport::negotiate_dc_as_offerer(&mut sig, DC_LABEL)
+    let peer = iroh_webrtc_transport::negotiate_dc_as_offerer(&mut sig, DC_LABEL)
         .await
         .context("WebRTC offer + SCTP data channel")?;
 
     transport
         .attach_data_channel(
-            dc,
+            peer,
             custom_addr_from_opaque_data(&[1u8; 16]),
             AttachOptions {
                 mirror_sctp_echo: false,

@@ -2,11 +2,12 @@
 //!
 //! Build: `bash scripts/build-browser-wasm.sh`
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use iroh::endpoint::{RecvStream, SendStream};
-use iroh::Endpoint;
 use iroh::endpoint::presets;
+use iroh::{Endpoint, EndpointAddr, PublicKey, RelayUrl};
 use tokio::io::AsyncWriteExt;
 use wasm_bindgen::prelude::*;
 
@@ -72,6 +73,42 @@ impl IrohBrowserNode {
             .accept_bi()
             .await
             .map_err(|e| JsValue::from_str(&format!("accept_bi: {e}")))?;
+        Ok(JsepQuicSignaling { send, recv })
+    }
+
+    /// Dial another iroh node over QUIC with the JSEP ALPN, then open the signaling bidi stream (offerer side).
+    ///
+    /// `remote_node_id_z32` is the peer’s [`PublicKey`] string (same as shown in the UI).  
+    /// `remote_relay_url` must be the peer’s **home relay** (their page shows it); use that URL, not yours, unless you know what you’re doing.
+    #[wasm_bindgen(js_name = dialJsepSignaling)]
+    pub async fn dial_jsep_signaling(
+        &self,
+        remote_node_id_z32: &str,
+        remote_relay_url: &str,
+    ) -> Result<JsepQuicSignaling, JsValue> {
+        let remote_node_id_z32 = remote_node_id_z32.trim();
+        let remote_relay_url = remote_relay_url.trim();
+        if remote_node_id_z32.is_empty() {
+            return Err(JsValue::from_str("peer node id is empty"));
+        }
+        if remote_relay_url.is_empty() {
+            return Err(JsValue::from_str("peer relay URL is empty"));
+        }
+        let pk = PublicKey::from_str(remote_node_id_z32)
+            .map_err(|e| JsValue::from_str(&format!("parse peer node id: {e}")))?;
+        let relay: RelayUrl = remote_relay_url
+            .parse()
+            .map_err(|e| JsValue::from_str(&format!("parse peer relay URL: {e}")))?;
+        let addr = EndpointAddr::new(pk).with_relay_url(relay);
+        let conn = self
+            .ep
+            .connect(addr, SIGNALING_ALPN)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("iroh connect: {e}")))?;
+        let (send, recv) = conn
+            .open_bi()
+            .await
+            .map_err(|e| JsValue::from_str(&format!("open_bi: {e}")))?;
         Ok(JsepQuicSignaling { send, recv })
     }
 }

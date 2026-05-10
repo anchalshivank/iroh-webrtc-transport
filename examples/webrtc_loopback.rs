@@ -110,13 +110,13 @@ async fn main() -> Result<()> {
             let (send, recv) = connection.accept_bi().await.context("accept bi stream")?;
 
             let mut sig = iroh_webrtc_transport::QuicSignaling::new(send, recv);
-            let (_pc, dc) = iroh_webrtc_transport::negotiate_dc_as_answerer(&mut sig)
+            let peer = iroh_webrtc_transport::negotiate_dc_as_answerer(&mut sig)
                 .await
                 .context("WebRTC answer + SCTP data channel")?;
 
             server_transport
                 .attach_data_channel(
-                    dc,
+                    peer,
                     custom_addr_from_opaque_data(&[2u8; 16]),
                     AttachOptions {
                         mirror_sctp_echo: true,
@@ -159,14 +159,14 @@ async fn main() -> Result<()> {
     let (send, recv) = connection.open_bi().await.context("open bi stream")?;
 
     let mut sig = iroh_webrtc_transport::QuicSignaling::new(send, recv);
-    let (_pc, dc) = iroh_webrtc_transport::negotiate_dc_as_offerer(&mut sig, DC_LABEL)
+    let peer = iroh_webrtc_transport::negotiate_dc_as_offerer(&mut sig, DC_LABEL)
         .await
         .context("WebRTC offer + SCTP data channel")?;
 
     let (tap_tx, mut tap_rx) = tokio::sync::mpsc::unbounded_channel();
     client_transport
         .attach_data_channel(
-            dc.clone(),
+            peer,
             custom_addr_from_opaque_data(&[1u8; 16]),
             AttachOptions {
                 mirror_sctp_echo: false,
@@ -176,9 +176,10 @@ async fn main() -> Result<()> {
         .context("attach client bridge")?;
 
     let payload = b"loopback ping";
-    dc.send(&Bytes::copy_from_slice(payload))
-        .await
-        .context("client send on data channel")?;
+    client_transport
+        .webrtc_out_sender()
+        .send(payload.to_vec())
+        .map_err(|_| anyhow::anyhow!("client SCTP out queue closed"))?;
 
     let echoed = tokio::time::timeout(Duration::from_secs(60), tap_rx.recv())
         .await

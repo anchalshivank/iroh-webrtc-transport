@@ -193,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
     println!("JSEP WebSocket relay: ws://127.0.0.1:3000/ws");
     println!("Static UI: cargo run --bin static-server (http://127.0.0.1:8080/)");
     println!("ws-chat: cargo run --bin ws-chat -- ws://127.0.0.1:3000/ws demo");
+    println!("browser↔browser: static-server + two tabs, WebSocket room, same room name");
 
     axum::serve(listener, app).await?;
     Ok(())
