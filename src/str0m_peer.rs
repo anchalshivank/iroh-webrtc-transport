@@ -97,8 +97,6 @@ pub(crate) async fn drive_until_channel_ready(
                 next_wake = drain_handshake_outputs(
                     rtc,
                     socket,
-                    advertised_addr,
-                    &mut buf,
                     target,
                     answerer_cid,
                     &mut opened,
@@ -119,8 +117,6 @@ pub(crate) async fn drive_until_channel_ready(
                 next_wake = drain_handshake_outputs(
                     rtc,
                     socket,
-                    advertised_addr,
-                    &mut buf,
                     target,
                     answerer_cid,
                     &mut opened,
@@ -143,11 +139,10 @@ pub(crate) enum ChannelReadyTarget {
     Answerer,
 }
 
+/// Drain str0m `poll_output` until `Output::Timeout`. For each `Output::Transmit`, send UDP on `socket` (Sans-IO).
 async fn drain_handshake_outputs(
     rtc: &mut Rtc,
     socket: &UdpSocket,
-    _advertised_addr: SocketAddr,
-    _buf: &mut [u8],
     target: ChannelReadyTarget,
     answerer_cid: &mut Option<ChannelId>,
     opened: &mut bool,
