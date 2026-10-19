@@ -10,7 +10,7 @@ use anyhow::Context as _;
 use iroh::endpoint::presets;
 use iroh::{Endpoint, EndpointAddr, PublicKey, RelayUrl};
 use iroh_webrtc_transport::{
-    negotiate_dc_as_offerer, JSEP_SIGNALING_ALPN, QuicSignaling, Str0mPeer,
+    JSEP_SIGNALING_ALPN, QuicSignaling, Str0mPeer, negotiate_dc_as_offerer,
 };
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 

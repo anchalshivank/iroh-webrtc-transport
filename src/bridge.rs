@@ -1,19 +1,20 @@
-//! Bridges iroh [`CustomSender::poll_send`] / [`CustomEndpoint::poll_recv`] to a WebRTC SCTP data channel.
+//! Bridges iroh [`CustomSender::poll_send`] / [`CustomEndpoint::poll_recv`] to WebRTC SCTP data channels.
 //!
 //! One [`WebRtcTunnel`] is shared by [`crate::WebRtcTransport`], its [`crate::endpoint::WebRtcEndpoint`], and
-//! [`crate::sender::WebRtcSender`]. After JSEP establishes a channel, call [`WebRtcTunnel::attach_str0m_peer`].
+//! [`crate::sender::WebRtcSender`]. After JSEP establishes a channel, call [`WebRtcTunnel::attach_str0m_peer`]
+//! — one tunnel serves every peer: outbound payloads route by the destination's [`CustomAddr`] data,
+//! inbound datagrams arrive on a shared queue tagged with the source's [`CustomAddr`].
 //!
-//! ## `Arc` vs `Mutex` / `RwLock` (why both appear)
+//! ## `Arc` vs `Mutex` (why both appear)
 //!
 //! - `Arc` shares **ownership** of the tunnel across the transport, endpoint, and sender so they see the same queues.
-//! - `Mutex` is **not** a substitute for `Arc`: it only serializes access to a value. Here it wraps
-//!   one-off `take()` slots and the recv waker—short critical sections; `RwLock` would not help those.
-//! - [`CustomAddr`] for the remote peer is read on every `poll_send` validation but written once at attach, so it
-//!   lives in a [`RwLock`] so concurrent readers do not exclude each other.
+//! - `Mutex` is **not** a substitute for `Arc`: it only serializes access to a value. Here it wraps the
+//!   per-peer outbound map and the one-off inbound receiver — short critical sections.
 
+use std::collections::HashMap;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use iroh_base::CustomAddr;
 use tokio::sync::mpsc;
@@ -39,37 +40,44 @@ pub struct AttachOptions {
     pub tap_inbound_to: Option<mpsc::UnboundedSender<Vec<u8>>>,
 }
 
-/// Shared bridge between iroh custom transport I/O and one SCTP data channel.
+#[derive(Debug)]
+/// Outbound queue for one attached peer, plus the attach generation — a
+/// renegotiated channel's teardown must not evict its replacement's entry.
+struct PeerOut {
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+    generation: u64,
+}
+
+/// Shared bridge between iroh custom transport I/O and SCTP data channels — one per remote peer.
 #[derive(Debug)]
 pub(crate) struct WebRtcTunnel {
     /// Opaque local address bytes (same as [`crate::WebRtcTransport::local_addr`] data).
-    #[allow(dead_code)]
     local_addr_bytes: Vec<u8>,
     bound: AtomicBool,
-    attached: AtomicBool,
-    out_tx: mpsc::UnboundedSender<Vec<u8>>,
-    out_rx: Mutex<Option<mpsc::UnboundedReceiver<Vec<u8>>>>,
+    /// Live channels keyed by the remote's `CustomAddr` data — `poll_send` routes by it.
+    peers: Mutex<HashMap<Vec<u8>, PeerOut>>,
+    /// Attach generation counter — bumped per attach so stale teardown can be distinguished.
+    generation: AtomicU64,
     in_tx: mpsc::Sender<InboundPacket>,
     in_rx: Mutex<Option<mpsc::Receiver<InboundPacket>>>,
-    remote_custom: RwLock<Option<CustomAddr>>,
-    recv_waker: Mutex<Option<std::task::Waker>>,
 }
 
 impl WebRtcTunnel {
     pub(crate) fn new(local_addr_bytes: Vec<u8>) -> Arc<Self> {
-        let (out_tx, out_rx) = mpsc::unbounded_channel();
         let (in_tx, in_rx) = mpsc::channel(IN_QUEUE);
         Arc::new(Self {
             local_addr_bytes,
             bound: AtomicBool::new(false),
-            attached: AtomicBool::new(false),
-            out_tx,
-            out_rx: Mutex::new(Some(out_rx)),
+            peers: Mutex::new(HashMap::new()),
+            generation: AtomicU64::new(0),
             in_tx,
             in_rx: Mutex::new(Some(in_rx)),
-            remote_custom: RwLock::new(None),
-            recv_waker: Mutex::new(None),
         })
+    }
+
+    /// The [`CustomAddr`] this transport advertises.
+    pub(crate) fn local_addr(&self) -> CustomAddr {
+        CustomAddr::from_parts(WEBRTC_TRANSPORT_ID, &self.local_addr_bytes)
     }
 
     pub(crate) fn mark_bound(&self) -> io::Result<()> {
@@ -93,58 +101,49 @@ impl WebRtcTunnel {
             .ok_or_else(|| io::Error::other("inbound receiver already taken"))
     }
 
-    pub(crate) fn out_sender(&self) -> mpsc::UnboundedSender<Vec<u8>> {
-        self.out_tx.clone()
+    /// Outbound sender for the peer with this custom-addr data, if attached.
+    pub(crate) fn out_sender_for(
+        &self,
+        remote_data: &[u8],
+    ) -> Option<mpsc::UnboundedSender<Vec<u8>>> {
+        self.peers
+            .lock()
+            .ok()?
+            .get(remote_data)
+            .map(|p| p.tx.clone())
     }
 
-    pub(crate) fn remote_custom(&self) -> Option<CustomAddr> {
-        self.remote_custom.read().ok().and_then(|g| g.clone())
+    pub(crate) fn has_peer(&self, remote_data: &[u8]) -> bool {
+        self.peers
+            .lock()
+            .map(|p| p.contains_key(remote_data))
+            .unwrap_or(false)
     }
 
-    pub(crate) fn wake_recv_pollers(&self) {
-        if let Ok(mut g) = self.recv_waker.lock() {
-            if let Some(w) = g.take() {
-                w.wake();
+    /// Claim this peer's outbound slot; the driver task drains `rx`. Replacing an
+    /// existing entry drops the old sender, which ends the old driver's `recv()`.
+    /// Returns the generation identifying this attach.
+    pub(crate) fn register_peer_out(
+        &self,
+        remote_data: &[u8],
+    ) -> (u64, mpsc::UnboundedReceiver<Vec<u8>>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        self.peers
+            .lock()
+            .expect("poisoned peers lock")
+            .insert(remote_data.to_vec(), PeerOut { tx, generation });
+        (generation, rx)
+    }
+
+    /// Remove a peer's outbound entry — only if its generation still matches,
+    /// so a replaced channel's teardown can't evict the replacement.
+    pub(crate) fn remove_peer_out(&self, remote_data: &[u8], generation: u64) {
+        if let Ok(mut peers) = self.peers.lock() {
+            if peers.get(remote_data).map(|p| p.generation) == Some(generation) {
+                peers.remove(remote_data);
             }
         }
-    }
-
-    pub(crate) fn register_recv_waker(&self, waker: &std::task::Waker) {
-        if let Ok(mut g) = self.recv_waker.lock() {
-            *g = Some(waker.clone());
-        }
-    }
-
-    pub(crate) fn try_mark_attached(&self) -> io::Result<()> {
-        if self
-            .attached
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(io::Error::other(
-                "WebRtcTunnel::attach: data channel already attached",
-            ));
-        }
-        Ok(())
-    }
-
-    pub(crate) fn set_remote_custom(&self, addr: CustomAddr) -> io::Result<()> {
-        let mut g = self
-            .remote_custom
-            .write()
-            .map_err(|_| io::Error::other("poisoned tunnel lock"))?;
-        *g = Some(addr);
-        Ok(())
-    }
-
-    pub(crate) fn take_outbound_receiver(
-        &self,
-    ) -> io::Result<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
-        self.out_rx
-            .lock()
-            .map_err(|_| io::Error::other("poisoned tunnel lock"))?
-            .take()
-            .ok_or_else(|| io::Error::other("outbound receiver already taken"))
     }
 
     pub(crate) fn inbound_sender(&self) -> mpsc::Sender<InboundPacket> {

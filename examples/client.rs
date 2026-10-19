@@ -5,15 +5,9 @@ use anyhow::{Context, Result};
 use iroh::PublicKey;
 use iroh::{
     Endpoint, EndpointAddr, RelayUrl, TransportAddr,
-    endpoint::{
-        presets,
-        transports::{AddrKind, TransportBias},
-        QuicTransportConfig, RecvStream, SendStream,
-    },
+    endpoint::{QuicTransportConfig, RecvStream, SendStream, presets},
 };
-use iroh_webrtc_transport::{
-    AttachOptions, WebRtcTransport, WEBRTC_TRANSPORT_ID, custom_addr_from_opaque_data,
-};
+use iroh_webrtc_transport::{AttachOptions, WebRtcTransport, custom_addr_from_opaque_data};
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const SIGNALING_ALPN: &[u8] = b"iroh-webrtc-transport/signal/0";
@@ -31,10 +25,6 @@ fn quic_with_datagrams() -> QuicTransportConfig {
         .build()
 }
 
-fn custom_bias() -> TransportBias {
-    TransportBias::primary().with_rtt_advantage(std::time::Duration::from_millis(100))
-}
-
 fn mixed_server_addr(node_id: PublicKey, relay: RelayUrl) -> EndpointAddr {
     EndpointAddr::new(node_id)
         .with_relay_url(relay)
@@ -47,7 +37,9 @@ async fn line_chat(mut send: SendStream, recv: RecvStream, peer_label: &str) -> 
     let mut stdin = BufReader::new(io::stdin()).lines();
     let mut peer_lines = BufReader::new(recv).lines();
 
-    println!("Chat ready. Lines you type go to the server; prefix `{peer_label}` shows their lines.");
+    println!(
+        "Chat ready. Lines you type go to the server; prefix `{peer_label}` shows their lines."
+    );
     println!("Empty line or Ctrl+D exits.\n");
 
     loop {
@@ -98,7 +90,6 @@ async fn main() -> Result<()> {
     let endpoint = Endpoint::builder(presets::N0)
         .alpns(vec![SIGNALING_ALPN.to_vec(), APP_ALPN.to_vec()])
         .transport_config(quic_with_datagrams())
-        .transport_bias(AddrKind::Custom(WEBRTC_TRANSPORT_ID), custom_bias())
         .add_custom_transport(transport.clone())
         .bind()
         .await

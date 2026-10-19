@@ -4,19 +4,17 @@ use std::task::{Context, Poll};
 
 use iroh::endpoint::transports::{CustomSender, Transmit};
 use iroh_base::CustomAddr;
-use tokio::sync::mpsc;
 
-use crate::bridge::WebRtcTunnel;
+use crate::bridge::{WEBRTC_TRANSPORT_ID, WebRtcTunnel};
 
 #[derive(Debug)]
 pub(crate) struct WebRtcSender {
-    out_tx: mpsc::UnboundedSender<Vec<u8>>,
     tunnel: Arc<WebRtcTunnel>,
 }
 
 impl WebRtcSender {
-    pub(crate) fn new(out_tx: mpsc::UnboundedSender<Vec<u8>>, tunnel: Arc<WebRtcTunnel>) -> Self {
-        Self { out_tx, tunnel }
+    pub(crate) fn new(tunnel: Arc<WebRtcTunnel>) -> Self {
+        Self { tunnel }
     }
 
     fn split_transmit<'a>(transmit: &'a Transmit<'a>) -> impl Iterator<Item = Vec<u8>> + 'a {
@@ -24,41 +22,44 @@ impl WebRtcSender {
             .segment_size
             .unwrap_or(transmit.contents.len())
             .max(1);
-        transmit
-            .contents
-            .chunks(segment_size)
-            .map(|c| c.to_vec())
+        transmit.contents.chunks(segment_size).map(|c| c.to_vec())
     }
 }
 
 impl CustomSender for WebRtcSender {
     fn is_valid_send_addr(&self, addr: &CustomAddr) -> bool {
-        self.tunnel
-            .remote_custom()
-            .is_some_and(|r| r.id() == addr.id() && r.data() == addr.data())
+        addr.id() == WEBRTC_TRANSPORT_ID && self.tunnel.has_peer(addr.data())
     }
 
     fn poll_send(
         &self,
         _cx: &mut Context,
         dst: &CustomAddr,
+        _src: Option<&CustomAddr>,
         transmit: &Transmit<'_>,
     ) -> Poll<io::Result<()>> {
-        if self.tunnel.remote_custom().is_none() {
+        let Some(out_tx) = self.tunnel.out_sender_for(dst.data()) else {
+            tracing::debug!(
+                ?dst,
+                len = transmit.contents.len(),
+                "no WebRTC channel for remote"
+            );
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::NotConnected,
-                "WebRTC data channel not attached to WebRtcTransport",
+                "no WebRTC data channel attached for that remote CustomAddr",
             )));
-        }
-        if !self.is_valid_send_addr(dst) {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "poll_send dst does not match attached remote CustomAddr",
-            )));
-        }
+        };
+        tracing::trace!(
+            ?dst,
+            len = transmit.contents.len(),
+            "sending QUIC datagram over SCTP"
+        );
 
+        // One SCTP message per QUIC segment — message boundary is the
+        // datagram boundary (max_transmit_segments is 1 so contents is
+        // normally a single packet).
         for chunk in Self::split_transmit(transmit) {
-            if self.out_tx.send(chunk).is_err() {
+            if out_tx.send(chunk).is_err() {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
                     "WebRTC outbound queue closed",

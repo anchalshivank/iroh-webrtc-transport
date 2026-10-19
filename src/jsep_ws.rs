@@ -7,8 +7,8 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::jsep_envelope::SignalEnvelope;
 use crate::jsep_signaling::Signaling;

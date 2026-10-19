@@ -5,7 +5,7 @@
 use anyhow::Context as _;
 use futures_util::{SinkExt, StreamExt};
 use iroh_webrtc_transport::{
-    negotiate_dc_as_answerer, negotiate_dc_as_offerer, Str0mPeer, TcpWebSocket,
+    Str0mPeer, TcpWebSocket, negotiate_dc_as_answerer, negotiate_dc_as_offerer,
 };
 use serde_json::Value;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
@@ -84,9 +84,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let mut args = std::env::args().skip(1);
-    let url = args.next().context(
-        "Usage: ws-chat <ws-url> <room>\nExample: ws-chat ws://127.0.0.1:3000/ws demo",
-    )?;
+    let url = args
+        .next()
+        .context("Usage: ws-chat <ws-url> <room>\nExample: ws-chat ws://127.0.0.1:3000/ws demo")?;
     let room = args.next().context("missing <room>")?;
 
     let (mut ws, _) = connect_async(&url)

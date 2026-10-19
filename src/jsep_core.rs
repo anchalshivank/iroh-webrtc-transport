@@ -79,10 +79,7 @@ pub async fn negotiate_dc_as_answerer<S: Signaling + ?Sized>(
     };
 
     let offer = sdp_offer_from_string(&sdp).context("parse SDP offer")?;
-    let answer = rtc
-        .sdp_api()
-        .accept_offer(offer)
-        .context("accept_offer")?;
+    let answer = rtc.sdp_api().accept_offer(offer).context("accept_offer")?;
 
     sig.send_envelope(&SignalEnvelope::Answer {
         sdp: answer.to_sdp_string(),

@@ -13,6 +13,7 @@ use str0m::channel::ChannelId;
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc, RtcError};
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
 
 use crate::bridge::{AttachOptions, InboundPacket, WebRtcTunnel};
 
@@ -190,6 +191,7 @@ async fn str0m_user_bridge_loop(
             if bytes.is_empty() {
                 continue;
             }
+            let deadline = Instant::now() + CHANNEL_STALL_MAX;
             loop {
                 let mut wrote = false;
                 if let Some(mut ch) = rtc.channel(channel_id) {
@@ -202,10 +204,21 @@ async fn str0m_user_bridge_loop(
                 if wrote {
                     break;
                 }
-                next_wake = match drain_until_timeout(&mut rtc, &socket, advertised_addr, &mut buf).await {
-                    Ok(t) => t,
-                    Err(_) => return,
-                };
+                next_wake =
+                    match drain_until_timeout(&mut rtc, &socket, advertised_addr, &mut buf).await {
+                        Ok(t) => t,
+                        Err(_) => return,
+                    };
+                // A blocked channel's retries pace on str0m's hint and
+                // give up — unbounded busy-retry pegs a core.
+                if Instant::now() >= deadline {
+                    break;
+                }
+                let wait = next_wake
+                    .saturating_duration_since(Instant::now())
+                    .max(Duration::from_millis(1))
+                    .min(Duration::from_millis(50));
+                tokio::time::sleep(wait).await;
             }
             let _ = drain_until_timeout(&mut rtc, &socket, advertised_addr, &mut buf).await;
         }
@@ -313,126 +326,181 @@ pub(crate) fn sdp_answer_from_string(s: &str) -> anyhow::Result<SdpAnswer> {
     SdpAnswer::from_sdp_string(s).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// How long one message retries a would-blocked SCTP channel before
+/// the packet drops. The tunnel carries QUIC packets, which tolerate
+/// loss — a peer that stops draining its datachannel (a frozen or
+/// timer-throttled browser tab) must not spin a core forever.
+const CHANNEL_STALL_MAX: Duration = Duration::from_secs(5);
+
+/// Write `bytes` as one SCTP message, draining `Rtc` output while the
+/// channel reports would-block, then flushing the pending transmits.
+/// Would-block retries are paced on str0m's timeout hint and bounded
+/// by `CHANNEL_STALL_MAX`: `Ok(false)` means the peer's receive window
+/// is closed, and retrying back-to-back busy-spins the task at 100%
+/// CPU — starving every other connection the process serves.
+async fn send_channel_data(
+    rtc: &mut Rtc,
+    socket: &UdpSocket,
+    advertised_addr: SocketAddr,
+    channel_id: ChannelId,
+    buf: &mut [u8],
+    bytes: &[u8],
+) -> Result<Instant, RtcError> {
+    if bytes.is_empty() {
+        return drain_until_timeout(rtc, socket, advertised_addr, buf).await;
+    }
+    let deadline = Instant::now() + CHANNEL_STALL_MAX;
+    loop {
+        let wrote = match rtc.channel(channel_id) {
+            Some(mut ch) => ch.write(true, bytes)?,
+            None => return Ok(Instant::now()),
+        };
+        let next_wake = drain_until_timeout(rtc, socket, advertised_addr, buf).await?;
+        if wrote || Instant::now() >= deadline {
+            return Ok(next_wake);
+        }
+        let wait = next_wake
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(1))
+            .min(Duration::from_millis(50));
+        tokio::time::sleep(wait).await;
+    }
+}
+
 impl WebRtcTunnel {
+    /// Attach one peer's negotiated channel: registers the peer's outbound
+    /// queue and spawns the str0m driver task. One tunnel serves many peers —
+    /// a re-attach replaces the outbound sender (ending the old driver task),
+    /// and teardown removes the map entry only if this attach still owns it.
     pub(crate) fn attach_str0m_peer(
         self: &Arc<Self>,
         peer: Str0mPeer,
         remote_custom: CustomAddr,
         opts: AttachOptions,
     ) -> anyhow::Result<()> {
-        self.try_mark_attached()
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        self.set_remote_custom(remote_custom.clone())
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        let mut out_rx = self
-            .take_outbound_receiver()
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let remote_key = remote_custom.data().to_vec();
+        let (generation, mut out_rx) = self.register_peer_out(&remote_key);
 
         let in_tx = self.inbound_sender();
-        let wake = Arc::clone(self);
         let tap = opts.tap_inbound_to.clone();
         let mirror = opts.mirror_sctp_echo;
 
         let Str0mPeer {
-            mut rtc,
+            rtc,
             socket,
             channel_id,
             advertised_addr,
         } = peer;
 
+        let tunnel = Arc::clone(self);
         tokio::spawn(async move {
-            let mut buf = vec![0u8; 2000];
-            let mut next_wake = Instant::now();
-            loop {
-                while let Ok(bytes) = out_rx.try_recv() {
-                    if bytes.is_empty() {
-                        continue;
-                    }
-                    loop {
-                        let mut wrote = false;
-                        if let Some(mut ch) = rtc.channel(channel_id) {
-                            match ch.write(true, &bytes) {
-                                Ok(true) => wrote = true,
-                                Ok(false) => {}
-                                Err(_) => return,
-                            }
-                        }
-                        if wrote {
-                            break;
-                        }
-                        next_wake = match drain_until_timeout(&mut rtc, &socket, advertised_addr, &mut buf).await {
-                            Ok(t) => t,
-                            Err(_) => return,
-                        };
-                    }
-                    let _ = drain_until_timeout(&mut rtc, &socket, advertised_addr, &mut buf).await;
-                }
-
-                let sleep_dur = next_wake
-                    .saturating_duration_since(Instant::now())
-                    .max(Duration::from_millis(1))
-                    .min(Duration::from_millis(100));
-
-                tokio::select! {
-                    _ = tokio::time::sleep(sleep_dur) => {
-                        let now = Instant::now();
-                        if rtc.handle_input(Input::Timeout(now)).is_err() {
-                            return;
-                        }
-                        next_wake = match process_outputs_tunnel(
-                            &mut rtc,
-                            &socket,
-                            advertised_addr,
-                            &mut buf,
-                            channel_id,
-                            &in_tx,
-                            &wake,
-                            &remote_custom,
-                            mirror,
-                            tap.as_ref(),
-                        )
-                        .await
-                        {
-                            Ok(t) => t,
-                            Err(_) => return,
-                        };
-                    }
-                    r = socket.recv_from(&mut buf) => {
-                        let Ok((n, src)) = r else { return };
-                        if n == 0 {
-                            continue;
-                        }
-                        let now = Instant::now();
-                        let Ok(recv) = Receive::new(Protocol::Udp, src, advertised_addr, &buf[..n]) else {
-                            continue;
-                        };
-                        if rtc.handle_input(Input::Receive(now, recv)).is_err() {
-                            return;
-                        }
-                        next_wake = match process_outputs_tunnel(
-                            &mut rtc,
-                            &socket,
-                            advertised_addr,
-                            &mut buf,
-                            channel_id,
-                            &in_tx,
-                            &wake,
-                            &remote_custom,
-                            mirror,
-                            tap.as_ref(),
-                        )
-                        .await
-                        {
-                            Ok(t) => t,
-                            Err(_) => return,
-                        };
-                    }
-                }
-            }
+            drive_peer(
+                rtc,
+                socket,
+                channel_id,
+                advertised_addr,
+                &mut out_rx,
+                &in_tx,
+                remote_custom,
+                mirror,
+                tap,
+            )
+            .await;
+            // Only evict if this attach still owns the peer's slot.
+            tunnel.remove_peer_out(&remote_key, generation);
         });
 
         Ok(())
+    }
+}
+
+/// One peer's driver loop: outbound queue → SCTP writes, UDP socket → `Rtc`
+/// input, channel data → the shared inbound queue. Returns when the channel
+/// dies or the outbound queue closes (replaced or transport dropped).
+#[allow(clippy::too_many_arguments)]
+async fn drive_peer(
+    mut rtc: Rtc,
+    socket: UdpSocket,
+    channel_id: ChannelId,
+    advertised_addr: SocketAddr,
+    out_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
+    in_tx: &mpsc::Sender<InboundPacket>,
+    remote_custom: CustomAddr,
+    mirror: bool,
+    tap: Option<mpsc::UnboundedSender<Vec<u8>>>,
+) {
+    let mut buf = vec![0u8; 2000];
+    let mut next_wake = Instant::now();
+    loop {
+        let sleep_dur = next_wake
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(1))
+            .min(Duration::from_millis(100));
+
+        tokio::select! {
+            biased;
+            // Replaced channels close their queue — stop driving.
+            msg = out_rx.recv() => {
+                let Some(bytes) = msg else { return };
+                next_wake = match send_channel_data(
+                    &mut rtc, &socket, advertised_addr, channel_id, &mut buf, &bytes,
+                ).await {
+                    Ok(t) => t,
+                    Err(_) => return,
+                };
+            }
+            _ = tokio::time::sleep(sleep_dur) => {
+                let now = Instant::now();
+                if rtc.handle_input(Input::Timeout(now)).is_err() {
+                    return;
+                }
+                next_wake = match process_outputs_tunnel(
+                    &mut rtc,
+                    &socket,
+                    advertised_addr,
+                    &mut buf,
+                    channel_id,
+                    in_tx,
+                    &remote_custom,
+                    mirror,
+                    tap.as_ref(),
+                )
+                .await
+                {
+                    Ok(t) => t,
+                    Err(_) => return,
+                };
+            }
+            r = socket.recv_from(&mut buf) => {
+                let Ok((n, src)) = r else { return };
+                if n == 0 {
+                    continue;
+                }
+                let now = Instant::now();
+                let Ok(recv) = Receive::new(Protocol::Udp, src, advertised_addr, &buf[..n]) else {
+                    continue;
+                };
+                if rtc.handle_input(Input::Receive(now, recv)).is_err() {
+                    return;
+                }
+                next_wake = match process_outputs_tunnel(
+                    &mut rtc,
+                    &socket,
+                    advertised_addr,
+                    &mut buf,
+                    channel_id,
+                    in_tx,
+                    &remote_custom,
+                    mirror,
+                    tap.as_ref(),
+                )
+                .await
+                {
+                    Ok(t) => t,
+                    Err(_) => return,
+                };
+            }
+        }
     }
 }
 
@@ -443,7 +511,6 @@ async fn process_outputs_tunnel(
     buf: &mut [u8],
     channel_id: ChannelId,
     in_tx: &tokio::sync::mpsc::Sender<InboundPacket>,
-    wake: &Arc<WebRtcTunnel>,
     remote_custom: &CustomAddr,
     mirror: bool,
     tap: Option<&tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
@@ -463,9 +530,7 @@ async fn process_outputs_tunnel(
                     source_custom: remote_custom.clone(),
                     payload: bytes.clone(),
                 };
-                if in_tx.send(pkt).await.is_ok() {
-                    wake.wake_recv_pollers();
-                }
+                let _ = in_tx.send(pkt).await;
                 if mirror {
                     if let Some(mut ch) = rtc.channel(channel_id) {
                         let _ = ch.write(true, &bytes);

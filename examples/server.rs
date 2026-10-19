@@ -1,18 +1,11 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use iroh::{
     Endpoint, Watcher,
-    endpoint::{
-        presets,
-        transports::{AddrKind, TransportBias},
-        QuicTransportConfig, RecvStream, SendStream,
-    },
+    endpoint::{QuicTransportConfig, RecvStream, SendStream, presets},
 };
-use iroh_webrtc_transport::{
-    AttachOptions, WebRtcTransport, WEBRTC_TRANSPORT_ID, custom_addr_from_opaque_data,
-};
+use iroh_webrtc_transport::{AttachOptions, WebRtcTransport, custom_addr_from_opaque_data};
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 /// QUIC connections carrying WebRTC SDP (JSEP) over the normal iroh path.
@@ -29,16 +22,14 @@ fn quic_with_datagrams() -> QuicTransportConfig {
         .build()
 }
 
-fn custom_bias() -> TransportBias {
-    TransportBias::primary().with_rtt_advantage(Duration::from_millis(100))
-}
-
 /// Line-oriented chat: each line is one message (UTF-8). Empty line or Ctrl+D on stdin ends your side.
 async fn line_chat(mut send: SendStream, recv: RecvStream, peer_label: &str) -> Result<()> {
     let mut stdin = BufReader::new(io::stdin()).lines();
     let mut peer_lines = BufReader::new(recv).lines();
 
-    println!("Chat ready. Lines you type go to the client; prefix `{peer_label}` shows their lines.");
+    println!(
+        "Chat ready. Lines you type go to the client; prefix `{peer_label}` shows their lines."
+    );
     println!("Empty line or Ctrl+D exits.\n");
 
     loop {
@@ -76,7 +67,6 @@ async fn main() -> Result<()> {
     let endpoint = Endpoint::builder(presets::N0)
         .alpns(vec![SIGNALING_ALPN.to_vec(), APP_ALPN.to_vec()])
         .transport_config(quic_with_datagrams())
-        .transport_bias(AddrKind::Custom(WEBRTC_TRANSPORT_ID), custom_bias())
         .add_custom_transport(transport.clone())
         .bind()
         .await
@@ -84,18 +74,14 @@ async fn main() -> Result<()> {
 
     endpoint.online().await;
     let dial_to_server = endpoint.watch_addr().get();
-    let relay = dial_to_server
-        .relay_urls()
-        .next()
-        .cloned()
-        .context(
+    let relay =
+        dial_to_server.relay_urls().next().cloned().context(
             "no relay URL in local EndpointAddr; check network and preset (presets::N0)",
         )?;
 
     println!(
         "Signaling: run\n  cargo run --example client -- {} {}\nThen a chat session opens on the second QUIC connection (WebRTC-bridged path when selected).\nServer custom addr opaque bytes: sixteen 0x01 (must match client).",
-        dial_to_server.id,
-        relay
+        dial_to_server.id, relay
     );
 
     let server = {
@@ -145,9 +131,7 @@ async fn main() -> Result<()> {
             let Some(incoming2) = ep.accept().await else {
                 anyhow::bail!("endpoint closed before second accept");
             };
-            let mut accepting2 = incoming2
-                .accept()
-                .context("accept APP_ALPN handshake")?;
+            let mut accepting2 = incoming2.accept().context("accept APP_ALPN handshake")?;
             let alpn2 = accepting2.alpn().await.context("read APP ALPN")?;
             anyhow::ensure!(
                 alpn2 == APP_ALPN,
